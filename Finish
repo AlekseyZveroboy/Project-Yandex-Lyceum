@@ -1,0 +1,310 @@
+import sys
+import json
+import os
+from pydub import AudioSegment
+from PyQt6.QtCore import Qt
+from PyQt6.QtGui import QPixmap
+from PyQt6.QtWidgets import (
+    QLabel,
+    QFileDialog,
+    QPushButton,
+    QApplication,
+    QWidget,
+    QTabWidget,
+    QTableWidget,
+    QTableWidgetItem,
+    QVBoxLayout,
+    QMainWindow,
+    QMessageBox
+)
+from PIL import Image, ImageDraw, ImageQt
+import simpleaudio as sa
+import numpy as np
+from scipy.fft import fft, fftfreq
+
+# Убедитесь, что ffmpeg в PATH или укажите полный путь
+AudioSegment.converter = "ffmpeg"  # Или полный путь: r"C:\path\to\ffmpeg.exe"
+
+class Main_Window(QMainWindow):
+    def __init__(self):
+        super().__init__()
+        self.init_ui()
+        self.load_cache()
+
+    def init_ui(self):
+        self.setGeometry(50, 50, 500, 500)
+        self.setWindowTitle('Преобразование звука в ноты')
+        self.tabs = QTabWidget(self)
+
+        self.file_tab = QWidget()
+        self.notes_tab = QWidget()
+
+        self.tabs.addTab(self.file_tab, "Звуковой файл")
+        self.tabs.addTab(self.notes_tab, "Ноты")
+
+        self.setup_page1()
+        self.setup_page2()
+
+        self.file_tab.setLayout(self.page1_layout)
+        self.notes_tab.setLayout(self.page2_layout)
+
+        self.setCentralWidget(self.tabs)
+
+    def setup_page1(self):
+        self.download_file_button = QPushButton("Загрузить файл", self)
+        self.download_file_button.clicked.connect(self.download_file)
+
+        self.file_title_label = QLabel("Нет выбранного файла", self)
+
+        self.page1_layout = QVBoxLayout()
+        self.page1_layout.addWidget(self.download_file_button)
+        self.page1_layout.addWidget(self.file_title_label)
+
+    def setup_page2(self):
+        self.note_image = QLabel(self)
+        # self.note_image.setAlignment(Qt.AlignCenter)
+
+        self.remake_note_button = QPushButton("Редактировать ноты", self)
+        self.make_note_button = QPushButton("Создать ноты", self)
+        self.save_button = QPushButton("Сохранить", self)
+
+        self.remake_note_button.clicked.connect(self.edit_notes)
+        self.make_note_button.clicked.connect(self.create_notes)
+        self.save_button.clicked.connect(self.save_notes)
+
+        self.page2_layout = QVBoxLayout()
+        self.page2_layout.addWidget(self.note_image)
+        self.page2_layout.addWidget(self.remake_note_button)
+        self.page2_layout.addWidget(self.make_note_button)
+        self.page2_layout.addWidget(self.save_button)
+
+    def load_cache(self):
+        try:
+            with open("cache.json", "r") as f:
+                data = json.load(f)
+                self.file_name = data['file']
+                self.notes = data['notes']
+        except FileNotFoundError:
+            self.file_name = ""
+            self.notes = []
+
+    def download_file(self):
+        file_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Открыть музыкальный файл",
+            "",
+            "Звуковой файл (*.mp3);;Звуковой файл (*.wav);;Звуковой файл (*.ogg);;Все файлы (*)",
+        )
+        if file_path:
+            self.file_name = file_path
+            self.file_title_label.setText(os.path.basename(self.file_name))
+
+            try:
+                print(f"Загрузка файла: {self.file_name}")
+                self.audio_data = AudioSegment.from_file(self.file_name)
+                print(f"Файл загружен: длительность {len(self.audio_data)} мс, частота {self.audio_data.frame_rate}")
+                self.notes = Notes().convert_audio_to_notes(self.audio_data)
+                self.update_notes_view()
+            except Exception as e:
+                print(f"Ошибка: {e}")
+                QMessageBox.critical(self, "Ошибка", f"Не удалось загрузить файл: {str(e)}")
+
+    def play_sound(self):
+        audio_data = self.audio_data.raw_data
+        wave_obj = sa.WaveObject(audio_data, 1, 2, self.audio_data.frame_rate)
+        play_obj = wave_obj.play()
+        play_obj.wait_done()
+
+    def edit_notes(self):
+        editor = NoteEditor(self, self.notes)
+        editor.show()
+
+    def create_notes(self):
+        self.edit_notes()
+        # new_notes = Notes().generate_random_notes()
+        # self.notes = new_notes
+        self.update_notes_view()
+
+    def save_notes(self):
+        filename, _ = QFileDialog.getSaveFileName(
+            self,
+            "Сохранить изображение нот",
+            "",
+            "PNG (*.png);;JPEG (*.jpg);;All Files (*)"
+        )
+        if filename:
+            img = self.draw_notes(self.notes)
+            img.save(filename)
+
+    def draw_notes(self, notes):
+        # Фильтруем None
+        notes = [n for n in notes if n[0] is not None]
+        if not notes:
+            return Image.new("RGB", (100, 100), color="white")
+
+        octaves = set(note[1] for note in notes)
+        lines_count = len(octaves) * 6 if octaves else 6
+        line_height = 500 / lines_count  # Уменьшаем размер для безопасности
+
+        image = Image.new("RGB", (1000, 500), color="white")
+        drawer = ImageDraw.Draw(image)
+
+        for i in range(lines_count):
+            y_pos = i * line_height
+            drawer.line((0, y_pos, 1000, y_pos), fill="black", width=2)
+
+        notes1 = {'до': 1, 'до-диез': 2, 'ре': 3, 'ре-диез': 4, 'ми': 5, 'фа': 6, 'фа-диез': 7, 'соль': 8,
+                 'соль-диез': 9, 'ля': 10, 'си-бемоль': 11, 'си': 12}
+        octaves1 = {"субконтроктава": 0, "контроктава": 1, "большая": 2, "малая": 3, "первая": 4, "вторая": 5,
+                    "третья": 6, "четвёртая": 7, "пятая": 8}
+
+
+        for idx, note in enumerate(notes):
+            note_value =  notes1[note[0]]
+            octave = octaves1[note[1]]
+            duration = int(note[2] or 1)  # Фикс для None/некорректных
+
+            pos_x = idx * 50
+            pos_y = ((hash(octave) % 7) * line_height) + (line_height / 2)  # Простой хэш для позиции
+
+            if duration > 0:
+                drawer.ellipse((pos_x, pos_y - 10, pos_x + 20, pos_y + 10), outline='black', fill=None)
+
+        return image
+
+    def update_notes_view(self):
+        img = self.draw_notes(self.notes)
+        pixmap = QPixmap.fromImage(ImageQt.ImageQt(img))
+        self.note_image.setPixmap(pixmap)
+
+    def closeEvent(self, event):
+        cache_data = {
+            'file': self.file_name,
+            'notes': self.notes
+        }
+        with open("cache.json", "w") as f:
+            json.dump(cache_data, f)
+        event.accept()
+
+
+class Notes():
+    def __init__(self, initial_notes=[]):
+        self.notes = initial_notes
+
+    def convert_audio_to_notes(self, audio_segment):
+        frequencies = {20: ('ми', 'субконтроктава'), 21: ('фа', 'субконтроктава'),
+                       23: ('фа-диез', 'субконтроктава'), 24: ('соль', 'субконтроктава'),
+                       25: ('соль-диез', 'субконтроктава'), 27: ('ля', 'субконтроктава'),
+                       29: ('си-бемоль', 'субконтроктава'), 30: ('си', 'субконтроктава'),
+                       32: ('до', 'контроктава'), 34: ('до-диез', 'контроктава'),
+                       36: ('ре', 'контроктава'), 38: ('ре-диез', 'контроктава'),
+                       41: ('ми', 'контроктава'), 43: ('фа', 'контроктава'),
+                       46: ('фа-диез', 'контроктава'), 49: ('соль', 'контроктава'),
+                       51: ('соль-диез', 'контроктава'), 55: ('ля', 'контроктава'),
+                       58: ('си-бемоль', 'контроктава'), 61: ('си', 'контроктава'), 65: ('до', 'большая'),
+                       69: ('до-диез', 'большая'), 73: ('ре', 'большая'), 77: ('ре-диез', 'большая'),
+                       82: ('ми', 'большая'), 87: ('фа', 'большая'), 92: ('фа-диез', 'большая'),
+                       98: ('соль', 'большая'), 103: ('соль-диез', 'большая'), 110: ('ля', 'большая'),
+                       116: ('си-бемоль', 'большая'), 123: ('си', 'большая'), 130: ('до', 'малая'),
+                       138: ('до-диез', 'малая'), 147: ('ре', 'малая'), 155: ('ре-диез', 'малая'),
+                       164: ('ми', 'малая'), 174: ('фа', 'малая'), 185: ('фа-диез', 'малая'),
+                       196: ('соль', 'малая'), 207: ('соль-диез', 'малая'), 220: ('ля', 'малая'),
+                       233: ('си-бемоль', 'малая'), 246: ('си', 'малая'), 261: ('до', 'первая'),
+                       277: ('до-диез', 'первая'), 293: ('ре', 'первая'), 311: ('ре-диез', 'первая'),
+                       329: ('ми', 'первая'), 349: ('фа', 'первая'), 369: ('фа-диез', 'первая'),
+                       392: ('соль', 'первая'), 415: ('соль-диез', 'первая'), 440: ('ля', 'первая'),
+                       466: ('си-бемоль', 'первая'), 493: ('си', 'первая'), 523: ('до', 'вторая'),
+                       554: ('до-диез', 'вторая'), 587: ('ре', 'вторая'), 622: ('ре-диез', 'вторая'),
+                       659: ('ми', 'вторая'), 698: ('фа', 'вторая'), 739: ('фа-диез', 'вторая'),
+                       784: ('соль', 'вторая'), 830: ('соль-диез', 'вторая'), 880: ('ля', 'вторая'),
+                       932: ('си-бемоль', 'вторая'), 987: ('си', 'вторая'), 1046: ('до', 'третья'),
+                       1108: ('до-диез', 'третья'), 1174: ('ре', 'третья'), 1244: ('ре-диез', 'третья'),
+                       1318: ('ми', 'третья'), 1396: ('фа', 'третья'), 1480: ('фа-диез', 'третья'),
+                       1568: ('соль', 'третья'), 1661: ('соль-диез', 'третья'), 1720: ('ля', 'третья'),
+                       1864: ('си-бемоль', 'третья'), 1975: ('си', 'третья'), 2093: ('до', 'четвёртая'),
+                       2217: ('до-диез', 'четвёртая'), 2349: ('ре', 'четвёртая'),
+                       2489: ('ре-диез', 'четвёртая'), 2637: ('ми', 'четвёртая'),
+                       2793: ('фа', 'четвёртая'), 2960: ('фа-диез', 'четвёртая'),
+                       3136: ('соль', 'четвёртая'), 3332: ('соль-диез', 'четвёртая'),
+                       3440: ('ля', 'четвёртая'), 3729: ('си-бемоль', 'четвёртая'),
+                       3951: ('си', 'четвёртая'), 4186: ('до', 'пятая'), 4434: ('до-диез', 'пятая'),
+                       4698: ('ре', 'пятая'), 4978: ('ре-диез', 'пятая'), 5274: ('ми', 'пятая')}
+
+
+        try:
+            signal = audio_segment
+        except Exception:
+            signal = AudioSegment.silent(duration=0)
+        print(f"Частота сэмплирования: {signal.frame_rate}")
+
+        samples = np.array(signal.get_array_of_samples())
+        sample_rate = signal.frame_rate
+        chunk_size = 4000
+        notes_zvuk = []
+
+        for i in range(0, len(samples), chunk_size):
+            chunk = samples[i:i + chunk_size]
+            if len(chunk) < chunk_size:
+                chunk = np.pad(chunk, (0, chunk_size - len(chunk)), 'constant')
+
+            # FFT для анализа доминирующей частоты
+            yf = fft(chunk)
+            xf = fftfreq(chunk_size, 1 / sample_rate)
+            dominant_freq = abs(xf[np.argmax(abs(yf[0:chunk_size//2]))])  # Доминирующая частота
+
+            # Находим ближайший ключ в словаре
+            closest_freq = min(frequencies.keys(), key=lambda k: abs(k - dominant_freq))
+            if abs(closest_freq - dominant_freq) < 10:  # Порог для匹配а
+                note_info = frequencies[closest_freq]
+                notes_zvuk.append([note_info[0], note_info[1], 1])  # Длительность фиксирована
+            else:
+                notes_zvuk.append([None, None, None])
+        return notes_zvuk
+
+
+class NoteEditor(QWidget):
+    def __init__(self, parent, notes):
+        super().__init__()
+        self.parent = parent
+        self.notes = notes
+        self.init_ui()
+
+    def init_ui(self):
+        layout = QVBoxLayout()
+        table = QTableWidget()
+        table.setColumnCount(3)
+        table.setRowCount(len(self.notes))
+        headers = ["Нота", "Октава", "Длительность"]
+        table.setHorizontalHeaderLabels(headers)
+
+        for row_idx, note in enumerate(self.notes):
+            for col_idx, value in enumerate(note):
+                item = QTableWidgetItem(str(value) if value is not None else "")
+                table.setItem(row_idx, col_idx, item)
+
+        layout.addWidget(table)
+        button = QPushButton("Применить изменения")
+        button.clicked.connect(lambda: self.apply_changes(table))
+        layout.addWidget(button)
+        self.setLayout(layout)
+
+    def apply_changes(self, table):
+        updated_notes = []
+        rows = table.rowCount()
+        cols = table.columnCount()
+        for r in range(rows):
+            current_row = []
+            for c in range(cols):
+                text = table.item(r, c).text()
+                current_row.append(text if text else None)
+            updated_notes.append(current_row)
+        self.parent.notes = updated_notes
+        self.parent.update_notes_view()
+        self.close()
+
+
+if __name__ == '__main__':
+    app = QApplication(sys.argv)
+    window = Main_Window()
+    window.show()
+    sys.exit(app.exec())
